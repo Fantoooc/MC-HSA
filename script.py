@@ -1,15 +1,11 @@
-import sys
-import json, base64
-import math
+import sys, io, math, json, base64
 import requests
+import numpy as np
 from PIL import Image
-import io
 
 def fetch(username: str) -> bytes:
     headers = { "User-Agent": "minecraft-heads-spin-script/1.0"}
     try:
-        print(f"Parsing {username}'s minecraft skin")
-
         req1 = requests.get(f"https://api.mojang.com/users/profiles/minecraft/{username}", headers = headers)
         uuid = req1.json()["id"]
         print(f"Profile id is: {uuid}")
@@ -26,163 +22,160 @@ def fetch(username: str) -> bytes:
         raise ValueError(e)
     return
 
-def decode_png(data: bytes):
+def decode(data: bytes):
     if data[:8] != b"\x89PNG\r\n\x1a\n":
         raise ValueError("Not a png file has been downloaded")
 
-    img = Image.open(io.BytesIO(data)).convert("RGBA")
-    width, height = img.size
-    pixels = img.tobytes()
+    with Image.open(io.BytesIO(data)) as img:
+        img = img.convert("RGBA")
+        width, height = img.size
+        pixels = np.asarray(img)
 
     return width, height, pixels
 
-def get_texel(pixels, img_w, x, y):
-    off = (y * img_w + x) * 4
-    return pixels[off], pixels[off + 1], pixels[off + 2], pixels[off + 3]
+def extract(pixels: np.ndarray, x0: int, y0: int, size: int = 8) -> np.ndarray:
+    return pixels[y0 : y0 + size, x0 : x0 + size]
 
-def extract_face(pixels, img_w, x0, y0, size=8):
-    face = []
-    for y in range(size):
-        row = []
-        for x in range(size):
-            row.append(get_texel(pixels, img_w, x0 + x, y0 + y))
-        face.append(row)
-    return face
+def build_faces(pixels: np.ndarray):
+    # x: right
+    # y: up
+    # z: front
+    tex_normals = np.array([
+        (0, 1, 0),  # Top
+        (0, -1, 0), # Bottom
+        (1, 0, 0),  # Right
+        (0, 0, 1),  # Front
+        (-1, 0, 0), # Left
+        (0, 0, -1)  # Back
+    ], dtype = np.float32)
 
-def build_head_faces(pixels, img_w):
-    def base(x0, y0):
-        return extract_face(pixels, img_w, x0, y0, 8)
+    base_off = [(8, 0), (16, 0), (16, 8), (8, 8), (0, 8), (24, 8)]
+    hat_off  = [(40, 0), (48, 0), (48, 8), (40, 8), (32, 8), (56, 8)]
 
-    faces = [
-        dict(name="top", normal=(0, 1, 0),
-             corners=[(-.5, .5, -.5), (.5, .5, -.5), (.5, .5, .5), (-.5, .5, .5)],
-             tex=base(8, 0)),
-        dict(name="bottom", normal=(0, -1, 0),
-             corners=[(-.5, -.5, -.5), (.5, -.5, -.5), (.5, -.5, .5), (-.5, -.5, .5)],
-             tex=base(16, 0)),
-        dict(name="right", normal=(1, 0, 0),
-             corners=[(.5, .5, .5), (.5, .5, -.5), (.5, -.5, -.5), (.5, -.5, .5)],
-             tex=base(16, 8)),
-        dict(name="front", normal=(0, 0, 1),
-             corners=[(-.5, .5, .5), (.5, .5, .5), (.5, -.5, .5), (-.5, -.5, .5)],
-             tex=base(8, 8)),
-        dict(name="left", normal=(-1, 0, 0),
-             corners=[(-.5, .5, -.5), (-.5, .5, .5), (-.5, -.5, .5), (-.5, -.5, -.5)],
-             tex=base(0, 8)),
-        dict(name="back", normal=(0, 0, -1),
-             corners=[(.5, .5, -.5), (-.5, .5, -.5), (-.5, -.5, -.5), (.5, -.5, -.5)],
-             tex=base(24, 8)),
-    ]
+    corners = np.array([
+        [(-.5, .5, -.5), (.5, .5, -.5), (.5, .5, .5), (-.5, .5, .5)],     # Top
+        [(-.5, -.5, -.5), (.5, -.5, -.5), (.5, -.5, .5), (-.5, -.5, .5)], # Bottom
+        [(.5, .5, .5), (.5, .5, -.5), (.5, -.5, -.5), (.5, -.5, .5)],     # Right
+        [(-.5, .5, .5), (.5, .5, .5), (.5, -.5, .5), (-.5, -.5, .5)],     # Front
+        [(-.5, .5, -.5), (-.5, .5, .5), (-.5, -.5, .5), (-.5, -.5, -.5)], # Left
+        [(.5, .5, -.5), (-.5, .5, -.5), (-.5, -.5, -.5), (.5, -.5, -.5)]  # Back
+    ], dtype = np.float32)
 
-    hat_coords = {
-        "top": (40, 0), "bottom": (48, 0),
-        "right": (48, 8), "front": (40, 8),
-        "left": (32, 8), "back": (56, 8),
-    }
-    hat_faces = []
-    has_hat = False
+    tex     = np.stack([extract(pixels, x0, y0) for x0, y0 in base_off])
+    hat_tex = np.stack([extract(pixels, x0, y0) for x0, y0 in hat_off])
+
+    has_hat = (hat_tex[..., 3] > 10).any()
     scale = 1.12
-    for f in faces:
-        x0, y0 = hat_coords[f["name"]]
-        tex = base(x0, y0)
-        if any(t[3] > 10 for row in tex for t in row):
-            has_hat = True
-        hat_faces.append(dict(
-            name=f["name"] + "_hat",
-            normal=f["normal"],
-            corners=[(cx * scale, cy * scale, cz * scale) for cx, cy, cz in f["corners"]],
-            tex=tex,
-        ))
 
-    return faces, (hat_faces if has_hat else [])
+    faces     = dict(normal=tex_normals, corners=corners, tex=tex)
+    hat_faces = dict(normal=tex_normals, corners=corners * scale, tex=hat_tex) if has_hat else None
 
-def rotate_point(p, yaw, pitch):
-    x, y, z = p
+    return faces, hat_faces
+
+def rotate_points(points, yaw, pitch):
     cy, sy = math.cos(yaw), math.sin(yaw)
+    cp, sp = math.cos(pitch), math.sin(pitch)
+
+    x, y, z = points[..., 0], points[..., 1], points[..., 2]
+
     x1 = x * cy + z * sy
     z1 = -x * sy + z * cy
     y1 = y
-    cp, sp = math.cos(pitch), math.sin(pitch)
+
     y2 = y1 * cp - z1 * sp
     z2 = y1 * sp + z1 * cp
     x2 = x1
-    return (x2, y2, z2)
+
+    return np.stack([x2, y2, z2], axis = -1)
 
 def render_frame(faces, hat_faces, yaw, pitch, canvas_size, scale, bg_color, xoff, yoff):
     w = h = canvas_size
-    canvas = [list(bg_color) for _ in range(w * h)]
+    canvas = np.empty((w, h, len(bg_color)), dtype = np.float32)
+    canvas[:] = bg_color
     cx, cy = w / 2, h / 2
 
-    def project(p3):
-        x, y, z = p3
+    def project(points):
+        x, y, z = points[..., 0], points[..., 1], points[..., 2]
 
         x -= xoff
         y -= yoff
 
-        return (cx + x * scale, cy - y * scale, z)
+        px = cx + x * scale
+        py = cy - y * scale
 
-    def draw_face_list(face_list):
-        items = []
-        for f in face_list:
-            rn = rotate_point(f["normal"], yaw, pitch)
-            if rn[2] <= 0.001:
-                continue
-            rc = [rotate_point(c, yaw, pitch) for c in f["corners"]]
-            pc = [project(c) for c in rc]
-            avg_z = sum(c[2] for c in rc) / 4.0
-            items.append((avg_z, pc, f["tex"]))
-        items.sort(key=lambda it: it[0])
+        return np.stack([px, py, z], axis = -1)
 
-        for avg_z, pc, tex in items:
-            tex_size = len(tex)
-            p0 = pc[0]
-            u_vec = (pc[1][0] - p0[0], pc[1][1] - p0[1])
-            v_vec = (pc[3][0] - p0[0], pc[3][1] - p0[1])
+    def draw_faces(faces):
+        normals = faces["normal"]
+        corners = faces["corners"]
+        tex     = faces["tex"]
+
+        rn = rotate_points(normals, yaw, pitch)
+        rc = rotate_points(corners, yaw, pitch)
+        pc = project(rc)
+
+        visible = rn[..., 2] > 0.001
+        avg_z   = rc[..., 2].mean(axis = 1)
+
+        order = np.where(visible)[0]
+        order = order[np.argsort(avg_z[order])]
+
+        for i in order:
+            face_pc  = pc[i]
+            face_tex = tex[i]
+            tex_size = face_tex.shape[0]
+
+            p0 = face_pc[0, :2]
+            u_vec = face_pc[1, :2] - p0
+            v_vec = face_pc[3, :2] - p0
             det = u_vec[0] * v_vec[1] - u_vec[1] * v_vec[0]
             if abs(det) < 1e-9:
                 continue
             inv_det = 1.0 / det
 
-            xs = [pt[0] for pt in pc]
-            ys = [pt[1] for pt in pc]
-            minx, maxx = max(0, int(min(xs)) - 1), min(w - 1, int(max(xs)) + 1)
-            miny, maxy = max(0, int(min(ys)) - 1), min(h - 1, int(max(ys)) + 1)
+            xs, ys = face_pc[:, 0], face_pc[:, 1]
+            minx = max(0, int(np.floor(xs.min())) - 1)
+            maxx = min(w - 1, int(np.ceil(xs.max())) + 1)
+            miny = max(0, int(np.floor(ys.min())) - 1)
+            maxy = min(h - 1, int(np.ceil(ys.max())) + 1)
+            if maxx < minx or maxy < miny:
+                continue
 
-            for py in range(miny, maxy + 1):
-                for px in range(minx, maxx + 1):
-                    dx = (px + 0.5) - p0[0]
-                    dy = (py + 0.5) - p0[1]
-                    u = (dx * v_vec[1] - dy * v_vec[0]) * inv_det
-                    v = (u_vec[0] * dy - u_vec[1] * dx) * inv_det
-                    if 0 <= u < 1 and 0 <= v < 1:
-                        tx = min(tex_size - 1, int(u * tex_size))
-                        ty = min(tex_size - 1, int(v * tex_size))
-                        r, g, b, a = tex[ty][tx]
-                        idx = py * w + px
-                        inv_a = 255 - a
-                        bg_r, bg_g, bg_b = canvas[idx]
+            py_grid, px_grid = np.mgrid[miny:maxy + 1, minx:maxx + 1]
+            dx = (px_grid + 0.5) - p0[0]
+            dy = (py_grid + 0.5) - p0[1]
+            u = (dx * v_vec[1] - dy * v_vec[0]) * inv_det
+            v = (u_vec[0] * dy - u_vec[1] * dx) * inv_det
 
-                        canvas[idx] = [
-                            (r * a + bg_r * inv_a) >> 8,
-                            (g * a + bg_g * inv_a) >> 8,
-                            (b * a + bg_b * inv_a) >> 8,
-                        ]
+            mask = (u >= 0) & (u < 1) & (v >= 0) & (v < 1)
+            if not mask.any():
+                continue
 
-    draw_face_list(faces)
+            tx = np.clip((u * tex_size).astype(int), 0, tex_size - 1)
+            ty = np.clip((v * tex_size).astype(int), 0, tex_size - 1)
+            texel = face_tex[ty, tx]
+
+            a = texel[..., 3:4].astype(np.float32) / 255.0
+            rgb = texel[..., :3].astype(np.float32)
+
+            region = canvas[miny:maxy + 1, minx:maxx + 1]
+            blended = rgb * a + region * (1 - a)
+            region[mask] = blended[mask]
+            canvas[miny:maxy + 1, minx:maxx + 1] = region
+
+    draw_faces(faces)
     if hat_faces:
-        draw_face_list(hat_faces)
+        draw_faces(hat_faces)
 
-    return canvas
+    return np.clip(canvas, 0, 255).astype(np.uint8)
 
 def write(path, frames, width, height, delay_ms = 60, loop = True):
-    pil_frames = [Image.new("RGB", (width, height)) for _ in frames]
+    if frames is None or len(frames) == 0: return
 
-    for img,frame in zip(pil_frames, frames):
-        img.putdata([tuple(px) for px in frame])
-
-    strip = Image.new("RGB", (width * len(pil_frames), height))
-    for i, img in enumerate(pil_frames):
-        strip.paste(img, (i * width, 0))
+    strip = Image.new("RGB", (width * len(frames), height))
+    for i, frame in enumerate(frames):
+        with Image.fromarray(frame) as img:
+            strip.paste(img, (i * width, 0))
 
     strip = strip.quantize(
         colors = 256,
@@ -191,7 +184,7 @@ def write(path, frames, width, height, delay_ms = 60, loop = True):
 
     qframes = [
         strip.crop((i * width, 0, (i + 1) * width, height))
-        for i in range(len(pil_frames))
+        for i in range(len(frames))
     ]
 
     qframes[0].save(
@@ -211,7 +204,7 @@ def main():
         sys.exit(1)
 
     username = args[0]
-    output = "head_spin.gif"
+    output = "output.gif"
     n_frames = 36
     canvas_size = 200
 
@@ -238,25 +231,24 @@ def main():
         else:
             i += 1
 
-    png_data = fetch(username)
-
-    print("Decoding PNG...")
-    w, h, pixels = decode_png(png_data)
-
-    print("Making head geometry...")
-    faces, hat_faces = build_head_faces(pixels, w)
-
     scale = canvas_size * 0.34
     pitch = math.radians(pitch)
     bg_color = (54, 57, 63)
 
-    frames = []
-    print(f"Rendering {n_frames} frames...")
-    for i in range(n_frames):
-        yaw = 2 * math.pi * i / n_frames
-        frame = render_frame(faces, hat_faces, yaw, pitch, canvas_size, scale, bg_color, xoff, yoff)
-        frames.append(frame)
+    print(f"Parsing {username}'s minecraft skin")
+    png_data = fetch(username)
 
+    print("Decoding PNG...")
+    img_w, img_h, pixels = decode(png_data)
+
+    print("Making head geometry...")
+    faces, hat_faces = build_faces(pixels)
+
+    print(f"Rendering {n_frames} frames...")
+    frames = np.array([
+        render_frame(faces, hat_faces, 2 * math.pi * i / n_frames, pitch, canvas_size, scale, bg_color, xoff, yoff)
+        for i in range(n_frames)
+    ])
     print(f"Saving {output} ...")
     write(output, frames, canvas_size, canvas_size, delay_ms = 60, loop = True)
     print("Saved!")
