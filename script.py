@@ -1,7 +1,13 @@
-import sys, io, math, json, base64
-import requests
+import base64
+import io
+import json
+import math
+import sys
+
 import numpy as np
+import requests
 from PIL import Image
+
 
 def fetch(username: str) -> bytes:
     headers = { "User-Agent": "minecraft-heads-spin-script/1.0"}
@@ -67,8 +73,8 @@ def build_faces(pixels: np.ndarray):
     has_hat = (hat_tex[..., 3] > 10).any()
     scale = 1.12
 
-    faces     = dict(normal=tex_normals, corners=corners, tex=tex)
-    hat_faces = dict(normal=tex_normals, corners=corners * scale, tex=hat_tex) if has_hat else None
+    faces     = { "normal": tex_normals, "corners": corners, "tex": tex }
+    hat_faces = { "normal": tex_normals, "corners": corners * scale, "tex": hat_tex } if has_hat else None
 
     return faces, hat_faces
 
@@ -80,13 +86,11 @@ def rotate_points(points, yaw, pitch):
 
     x1 = x * cy + z * sy
     z1 = -x * sy + z * cy
-    y1 = y
 
-    y2 = y1 * cp - z1 * sp
-    z2 = y1 * sp + z1 * cp
-    x2 = x1
+    y1 = y * cp - z1 * sp
+    z2 = y * sp + z1 * cp
 
-    return np.stack([x2, y2, z2], axis = -1)
+    return np.stack([x1, y1, z2], axis = -1)
 
 def render_frame(faces, hat_faces, yaw, pitch, canvas_size, scale, bg_color, xoff, yoff):
     w = h = canvas_size
@@ -129,8 +133,7 @@ def render_frame(faces, hat_faces, yaw, pitch, canvas_size, scale, bg_color, xof
             u_vec = face_pc[1, :2] - p0
             v_vec = face_pc[3, :2] - p0
             det = u_vec[0] * v_vec[1] - u_vec[1] * v_vec[0]
-            if abs(det) < 1e-9:
-                continue
+            if abs(det) < 1e-9: continue
             inv_det = 1.0 / det
 
             xs, ys = face_pc[:, 0], face_pc[:, 1]
@@ -164,8 +167,7 @@ def render_frame(faces, hat_faces, yaw, pitch, canvas_size, scale, bg_color, xof
             canvas[miny:maxy + 1, minx:maxx + 1] = region
 
     draw_faces(faces)
-    if hat_faces:
-        draw_faces(hat_faces)
+    if hat_faces: draw_faces(hat_faces)
 
     return np.clip(canvas, 0, 255).astype(np.uint8)
 
@@ -239,7 +241,7 @@ def main():
     png_data = fetch(username)
 
     print("Decoding PNG...")
-    img_w, img_h, pixels = decode(png_data)
+    _, _, pixels = decode(png_data)
 
     print("Making head geometry...")
     faces, hat_faces = build_faces(pixels)

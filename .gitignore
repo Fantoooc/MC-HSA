@@ -1,0 +1,3 @@
+.venv
+rust/target
+/output.gif
